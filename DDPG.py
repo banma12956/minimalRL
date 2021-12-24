@@ -122,7 +122,9 @@ def main():
         
         for t in range(300): # maximum length of episode is 200 for Pendulum-v0
             a = mu(torch.from_numpy(s).float()) 
-            a = a.item() + ou_noise()[0]
+            # a = a.item() + ou_noise()[0]
+            a = torch.randn(1) * 0.5 + a
+            a = a.item()
             s_prime, r, done, info = env.step([a])
             memory.put((s,a,r/100.0,s_prime,done))
             score +=r
@@ -146,23 +148,19 @@ def main():
 if __name__ == '__main__':
     main()
 
-# of episode :20, avg score : -1541.6
-# of episode :40, avg score : -1540.1
-# of episode :60, avg score : -1486.9
-# of episode :80, avg score : -1565.1
-# of episode :100, avg score : -1601.7
-# of episode :120, avg score : -1527.2
-# of episode :140, avg score : -1540.0
-# of episode :160, avg score : -1593.6
-# of episode :180, avg score : -1524.9
-# of episode :200, avg score : -1333.4
-# of episode :220, avg score : -1247.1
-# of episode :240, avg score : -1295.4
-# of episode :260, avg score : -1015.3
-# of episode :280, avg score : -755.0
-# of episode :300, avg score : -597.0
-# of episode :320, avg score : -617.3
-# of episode :340, avg score : -283.2
-# of episode :360, avg score : -348.1
-# of episode :380, avg score : -268.9
-# of episode :400, avg score : -196.4
+# of episode :20, avg score : -1381.6
+# of episode :40, avg score : -1638.6
+# of episode :60, avg score : -1590.0
+# of episode :80, avg score : -1423.7
+# of episode :100, avg score : -1461.8
+# of episode :120, avg score : -1379.1
+# of episode :140, avg score : -1269.7
+# of episode :160, avg score : -1396.7
+# of episode :180, avg score : -1177.3
+# of episode :200, avg score : -1170.1
+# of episode :220, avg score : -1274.5
+# of episode :240, avg score : -862.1
+# of episode :260, avg score : -613.9
+# of episode :280, avg score : -658.6
+# of episode :300, avg score : -677.1
+# of episode :320, avg score : -613.3
