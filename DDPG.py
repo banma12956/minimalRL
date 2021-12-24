@@ -1,64 +1,77 @@
-# TODO: fuck it doesn't work and I don't know why
 import gym
 import random
-import numpy as np
 import collections
-
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import torch.nn.functional as F
-from torch.distributions import normal
+import torch.optim as optim
 
+#Hyperparameters
+lr_mu        = 0.0005
+lr_q         = 0.001
+gamma        = 0.99
+batch_size   = 32
 buffer_limit = 50000
-batch_size = 32
-tau = 0.005
-
-
-class Actor(nn.Module):
-    def __init__(self, obs_dim, act_dim):
-        super(Actor, self).__init__()
-        self.fc1 = nn.Linear(obs_dim, 128)
-        self.fc2 = nn.Linear(128, act_dim)
-
-    def forward(self, obs):
-        x = F.relu(self.fc1(obs))
-        x = torch.tanh(self.fc2(x)) * 2
-        
-        return x
-
-class Critic(nn.Module):
-    def __init__(self, obs_dim, act_dim):
-        super(Critic, self).__init__()
-        self.fc1 = nn.Linear(obs_dim+act_dim, 128)
-        self.fc2 = nn.Linear(128, 1)
-
-    def forward(self, obs, act):
-        x = torch.cat([obs, act], dim=1)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-
-        return x
+tau          = 0.005 # for target network soft update
 
 class ReplayBuffer():
     def __init__(self):
-        super(ReplayBuffer, self).__init__()
         self.buffer = collections.deque(maxlen=buffer_limit)
 
-    def push(self, tran):
-        self.buffer.append(tran)
+    def put(self, transition):
+        self.buffer.append(transition)
+    
+    def sample(self, n):
+        mini_batch = random.sample(self.buffer, n)
+        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
 
-    def sample(self):
-        trans = random.sample(self.buffer, batch_size)
-        states = torch.stack([ele[0] for ele in trans])
-        next_states = torch.stack([ele[1] for ele in trans])
-        actions = torch.stack([ele[2] for ele in trans])
-        rewards = torch.stack([ele[3] for ele in trans]).unsqueeze(1)
-
-        return states, next_states, actions, rewards
+        for transition in mini_batch:
+            s, a, r, s_prime, done_mask = transition
+            s_lst.append(s)
+            a_lst.append([a])
+            r_lst.append([r])
+            s_prime_lst.append(s_prime)
+            done_mask_lst.append([done_mask])
         
+        return torch.tensor(s_lst, dtype=torch.float), torch.tensor(a_lst), \
+               torch.tensor(r_lst), torch.tensor(s_prime_lst, dtype=torch.float), \
+               torch.tensor(done_mask_lst)
+    
+    def size(self):
+        return len(self.buffer)
 
-class OrnsteinUhlenbeckNoise:
+class MuNet(nn.Module):
+    def __init__(self):
+        super(MuNet, self).__init__()
+        self.fc1 = nn.Linear(3, 128)
+        self.fc2 = nn.Linear(128, 64)
+        self.fc_mu = nn.Linear(64, 1)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        mu = torch.tanh(self.fc_mu(x))*2 # Multipled by 2 because the action space of the Pendulum-v0 is [-2,2]
+        return mu
+
+class QNet(nn.Module):
+    def __init__(self):
+        super(QNet, self).__init__()
+        
+        self.fc_s = nn.Linear(3, 64)
+        self.fc_a = nn.Linear(1,64)
+        self.fc_q = nn.Linear(128, 32)
+        self.fc_3 = nn.Linear(32,1)
+
+    def forward(self, x, a):
+        h1 = F.relu(self.fc_s(x))
+        h2 = F.relu(self.fc_a(a))
+        cat = torch.cat([h1,h2], dim=1)
+        q = F.relu(self.fc_q(cat))
+        q = self.fc_3(q)
+        return q
+
+class OrnsteinUhlenbeckNoise:   # TODO: matters a lot
     def __init__(self, mu):
         self.theta, self.dt, self.sigma = 0.1, 0.01, 0.1
         self.mu = mu
@@ -69,90 +82,87 @@ class OrnsteinUhlenbeckNoise:
                 self.sigma * np.sqrt(self.dt) * np.random.normal(size=self.mu.shape)
         self.x_prev = x
         return x
-
-
-def evaluate(actor):
-    env = gym.make('Pendulum-v0')
-    done = False
-    episode_reward = 0.0
-    obs = env.reset()
-    while not done:
-        obs = torch.from_numpy(obs).float()
-        with torch.no_grad():
-            act = actor(obs)
-        obs, reward, done, _ = env.step(act)
-        episode_reward += reward.item()
+      
+def train(mu, mu_target, q, q_target, memory, q_optimizer, mu_optimizer):
+    s,a,r,s_prime,done_mask  = memory.sample(batch_size)
     
-    print("evaluate, get reward", episode_reward)
-
-def rollout(actor, buffer, ou_noise):
-    env = gym.make('Pendulum-v0')
-    obs = env.reset()
-    done = False
-    while not done:
-        obs = torch.from_numpy(obs).float()
-        with torch.no_grad():
-            mu = actor(obs)
-        # m = normal.Normal(mu, 0.1)
-        # act = m.sample()
-        act = mu.item() + ou_noise()[0]
-        act = torch.tensor([act]).float()
-
-        next_obs, reward, done, _ = env.step(act)
-
-        buffer.push([obs, torch.from_numpy(next_obs).float(), act, reward/100.0])
-        obs = next_obs
-
+    target = r + gamma * q_target(s_prime, mu_target(s_prime))
+    q_loss = F.smooth_l1_loss(q(s,a), target.detach())
+    q_optimizer.zero_grad()
+    q_loss.backward()
+    q_optimizer.step()
+    
+    mu_loss = -q(s,mu(s)).mean() # That's all for the policy loss.
+    mu_optimizer.zero_grad()
+    mu_loss.backward()
+    mu_optimizer.step()
+    
 def soft_update(net, net_target):
     for param_target, param in zip(net_target.parameters(), net.parameters()):
         param_target.data.copy_(param_target.data * (1.0 - tau) + param.data * tau)
-
-def train():
+    
+def main():
     env = gym.make('Pendulum-v0')
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.shape[0]
-    buffer = ReplayBuffer()
+    memory = ReplayBuffer()
 
-    actor = Actor(obs_dim, act_dim)
-    critic = Critic(obs_dim, act_dim)
-    actor_target = Actor(obs_dim, act_dim)
-    critic_target = Critic(obs_dim, act_dim)
+    q, q_target = QNet(), QNet()
+    q_target.load_state_dict(q.state_dict())
+    mu, mu_target = MuNet(), MuNet()
+    mu_target.load_state_dict(mu.state_dict())
 
-    actor_target.load_state_dict(actor.state_dict())
-    critic_target.load_state_dict(critic.state_dict())
+    score = 0.0
+    print_interval = 20
 
-    actor_optimizer = optim.Adam(actor.parameters(), lr=0.0005)
-    critic_optimizer = optim.Adam(critic.parameters(), lr=0.001)
-
+    mu_optimizer = optim.Adam(mu.parameters(), lr=lr_mu)
+    q_optimizer  = optim.Adam(q.parameters(), lr=lr_q)
     ou_noise = OrnsteinUhlenbeckNoise(mu=np.zeros(1))
 
-    for i in range(1001):
-        rollout(actor, buffer, ou_noise)
-
-        for j in range(10):
-            states, next_states, actions, rewards = buffer.sample()
-
-            # update critic
-            with torch.no_grad():
-                q_target = rewards + critic_target(next_states, actor_target(next_states))
-            critic_loss = F.smooth_l1_loss(critic(states, actions), q_target)
-            critic_loss.backward()
-            critic_optimizer.step()
-            critic_optimizer.zero_grad()
-
-            # update actor
-            actor_loss = - critic(states, actor(states)).mean()
-            actor_loss.backward()
-            actor_optimizer.step()
-            actor_optimizer.zero_grad()
-
-            # update target networks
-            soft_update(actor, actor_target)
-            soft_update(critic, critic_target)
+    for n_epi in range(10000):
+        s = env.reset()
         
-        if i % 20 == 0:
-            print("epoch", i, end=', ')
-            evaluate(actor)
+        for t in range(300): # maximum length of episode is 200 for Pendulum-v0
+            a = mu(torch.from_numpy(s).float()) 
+            a = a.item() + ou_noise()[0]
+            s_prime, r, done, info = env.step([a])
+            memory.put((s,a,r/100.0,s_prime,done))
+            score +=r
+            s = s_prime
+
+            if done:
+                break              
+                
+        if memory.size()>2000:
+            for i in range(10):
+                train(mu, mu_target, q, q_target, memory, q_optimizer, mu_optimizer)
+                soft_update(mu, mu_target)
+                soft_update(q,  q_target)
+        
+        if n_epi%print_interval==0 and n_epi!=0:
+            print("# of episode :{}, avg score : {:.1f}".format(n_epi, score/print_interval))
+            score = 0.0
+
+    env.close()
 
 if __name__ == '__main__':
-    train()
+    main()
+
+# of episode :20, avg score : -1541.6
+# of episode :40, avg score : -1540.1
+# of episode :60, avg score : -1486.9
+# of episode :80, avg score : -1565.1
+# of episode :100, avg score : -1601.7
+# of episode :120, avg score : -1527.2
+# of episode :140, avg score : -1540.0
+# of episode :160, avg score : -1593.6
+# of episode :180, avg score : -1524.9
+# of episode :200, avg score : -1333.4
+# of episode :220, avg score : -1247.1
+# of episode :240, avg score : -1295.4
+# of episode :260, avg score : -1015.3
+# of episode :280, avg score : -755.0
+# of episode :300, avg score : -597.0
+# of episode :320, avg score : -617.3
+# of episode :340, avg score : -283.2
+# of episode :360, avg score : -348.1
+# of episode :380, avg score : -268.9
+# of episode :400, avg score : -196.4
