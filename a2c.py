@@ -9,11 +9,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-tau          = 0.5
 gamma        = 1
-epsilon      = 1e-6
-batch_size   = 32
-buffer_limit = 50000
 
 class Actor(nn.Module):
     def __init__(self, obs_dim, act_dim):
